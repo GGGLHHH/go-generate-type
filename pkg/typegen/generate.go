@@ -132,7 +132,7 @@ func GenerateTypesWithOptions(opts Options) (string, error) {
 				return "", fmt.Errorf("compile include type pattern: %w", err)
 			}
 		}
-		output = filterByWhitelist(output, fileRegexp, typeRegexp)
+		output = filterByWhitelist(output, fileRegexp, typeRegexp, renameMap)
 	}
 
 	output = filterInterfaceTypes(output, interfaceTypes)
@@ -334,7 +334,9 @@ func collectInterfaceTypeNames(pkgDir, pkgImportPath string) (map[string]struct{
 
 func collectStructRenameMap(pkgDir, pkgImportPath string, mapper func(typeName, moduleName string) string) (map[string]string, error) {
 	if mapper == nil {
-		return nil, nil
+		mapper = func(typeName, moduleName string) string {
+			return typeName
+		}
 	}
 
 	renames := make(map[string]string)
@@ -438,7 +440,7 @@ func collectStructRenameMap(pkgDir, pkgImportPath string, mapper func(typeName, 
 	return renames, nil
 }
 
-func filterByWhitelist(content string, fileRegexp, typeRegexp *regexp.Regexp) string {
+func filterByWhitelist(content string, fileRegexp, typeRegexp *regexp.Regexp, rename map[string]string) string {
 	if fileRegexp == nil && typeRegexp == nil {
 		return content
 	}
@@ -520,7 +522,7 @@ func filterByWhitelist(content string, fileRegexp, typeRegexp *regexp.Regexp) st
 		if block.name == "" {
 			continue
 		}
-		if matchesWhitelist(block.source, block.name, fileRegexp, typeRegexp) {
+		if matchesWhitelist(block.source, block.name, fileRegexp, typeRegexp, rename) {
 			if _, ok := selected[block.name]; !ok {
 				selected[block.name] = struct{}{}
 				queue = append(queue, block.name)
@@ -553,7 +555,7 @@ func filterByWhitelist(content string, fileRegexp, typeRegexp *regexp.Regexp) st
 	return strings.Join(result, "\n")
 }
 
-func matchesWhitelist(source, name string, fileRegexp, typeRegexp *regexp.Regexp) bool {
+func matchesWhitelist(source, name string, fileRegexp, typeRegexp *regexp.Regexp, rename map[string]string) bool {
 	if fileRegexp != nil && !fileRegexp.MatchString(source) {
 		return false
 	}
@@ -563,7 +565,13 @@ func matchesWhitelist(source, name string, fileRegexp, typeRegexp *regexp.Regexp
 	if name == "" {
 		return false
 	}
-	return typeRegexp.MatchString(name)
+	mapped := name
+	if rename != nil {
+		if next, ok := rename[name]; ok && next != "" {
+			mapped = next
+		}
+	}
+	return typeRegexp.MatchString(mapped)
 }
 
 func filterInterfaceTypes(content string, excluded map[string]struct{}) string {

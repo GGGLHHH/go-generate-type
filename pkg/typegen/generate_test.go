@@ -66,7 +66,7 @@ type Other struct {
 	if err != nil {
 		t.Fatalf("GenerateTypesWithOptions (raw): %v", err)
 	}
-	if !strings.Contains(raw, "foo_FooReq") {
+	if !strings.Contains(raw, "FooReq") {
 		t.Fatalf("expected FooReq in raw output")
 	}
 
@@ -79,19 +79,19 @@ type Other struct {
 		t.Fatalf("GenerateTypesWithOptions: %v", err)
 	}
 
-	if !strings.Contains(output, "foo_FooReq") {
+	if !strings.Contains(output, "FooReq") {
 		t.Fatalf("expected FooReq to be generated")
 	}
-	if !strings.Contains(output, "foo_Bar") {
+	if !strings.Contains(output, "Bar") {
 		t.Fatalf("expected referenced Bar to be generated")
 	}
-	if strings.Contains(output, "baz_Other") {
+	if strings.Contains(output, "Other") {
 		t.Fatalf("did not expect Other to be generated")
 	}
-	if strings.Contains(output, "foo_FooRes") {
+	if strings.Contains(output, "FooRes") {
 		t.Fatalf("did not expect FooRes to be generated")
 	}
-	if strings.Contains(output, "foo_Transaction") || strings.Contains(output, "foo_Embedded") {
+	if strings.Contains(output, "Transaction") || strings.Contains(output, "Embedded") {
 		t.Fatalf("did not expect interface types to be generated")
 	}
 }
