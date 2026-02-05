@@ -20,16 +20,29 @@ import (
 )
 
 type Options struct {
-	PkgPath        string
-	PkgDir         string
+	// PkgPath is the Go import path that corresponds to PkgDir.
+	// When empty, it resolves to "<module>/pkg" by walking up for go.mod.
+	PkgPath string
+	// PkgDir is the filesystem path to the root pkg directory (required).
+	PkgDir string
+	// IncludePattern is a regex matched against the "From <pkg>/<file>" source header.
 	IncludePattern string
-	IncludeType    string
+	// IncludeType is a regex matched against exported type names (after rename/prefix stripping).
+	IncludeType string
+	// StripPrefix removes package prefixes from generated identifiers (e.g. foo__bar_Baz -> Baz).
+	StripPrefix bool
+	// DisableRename skips the rename scan (TypeNameMapper is ignored) to avoid collisions.
+	DisableRename bool
+	// TypeNameMapper maps Go struct names to custom TypeScript names.
+	// It is ignored when DisableRename is true.
 	TypeNameMapper func(typeName string, moduleName string) string
 }
 
 type OutputOptions struct {
+	// OutputPath is the destination file path. When empty, DefaultOutputPath() is used.
 	OutputPath string
-	Stdout     bool
+	// Stdout writes to stdout instead of a file when true.
+	Stdout bool
 }
 
 const defaultOutputFile = "index.d.ts"
@@ -75,9 +88,12 @@ func GenerateTypesWithOptions(opts Options) (string, error) {
 		return "", fmt.Errorf("collect interface types: %w", err)
 	}
 
-	renameMap, err := collectStructRenameMap(pkgDir, pkgImportPath, opts.TypeNameMapper)
-	if err != nil {
-		return "", fmt.Errorf("collect struct rename map: %w", err)
+	var renameMap map[string]string
+	if !opts.DisableRename {
+		renameMap, err = collectStructRenameMap(pkgDir, pkgImportPath, opts.TypeNameMapper)
+		if err != nil {
+			return "", fmt.Errorf("collect struct rename map: %w", err)
+		}
 	}
 
 	// 使用单一 parser 处理所有包，确保跨包引用正确解析
@@ -116,6 +132,11 @@ func GenerateTypesWithOptions(opts Options) (string, error) {
 		return "", fmt.Errorf("serialize: %w", err)
 	}
 
+	var prefixes []string
+	if opts.StripPrefix || (opts.IncludeType != "" && len(renameMap) == 0) {
+		prefixes = collectPrefixes(pkgImportPath, packages)
+	}
+
 	if opts.IncludePattern != "" || opts.IncludeType != "" {
 		var fileRegexp *regexp.Regexp
 		var typeRegexp *regexp.Regexp
@@ -132,12 +153,15 @@ func GenerateTypesWithOptions(opts Options) (string, error) {
 				return "", fmt.Errorf("compile include type pattern: %w", err)
 			}
 		}
-		output = filterByWhitelist(output, fileRegexp, typeRegexp, renameMap)
+		output = filterByWhitelist(output, fileRegexp, typeRegexp, renameMap, prefixes)
 	}
 
 	output = filterInterfaceTypes(output, interfaceTypes)
 	if len(renameMap) > 0 {
 		output = renameIdentifiers(output, renameMap)
+	}
+	if opts.StripPrefix {
+		output = stripPrefixes(output, prefixes)
 	}
 	output = deduplicateTypes(output)
 
@@ -440,7 +464,7 @@ func collectStructRenameMap(pkgDir, pkgImportPath string, mapper func(typeName, 
 	return renames, nil
 }
 
-func filterByWhitelist(content string, fileRegexp, typeRegexp *regexp.Regexp, rename map[string]string) string {
+func filterByWhitelist(content string, fileRegexp, typeRegexp *regexp.Regexp, rename map[string]string, prefixes []string) string {
 	if fileRegexp == nil && typeRegexp == nil {
 		return content
 	}
@@ -522,7 +546,7 @@ func filterByWhitelist(content string, fileRegexp, typeRegexp *regexp.Regexp, re
 		if block.name == "" {
 			continue
 		}
-		if matchesWhitelist(block.source, block.name, fileRegexp, typeRegexp, rename) {
+		if matchesWhitelist(block.source, block.name, fileRegexp, typeRegexp, rename, prefixes) {
 			if _, ok := selected[block.name]; !ok {
 				selected[block.name] = struct{}{}
 				queue = append(queue, block.name)
@@ -555,7 +579,7 @@ func filterByWhitelist(content string, fileRegexp, typeRegexp *regexp.Regexp, re
 	return strings.Join(result, "\n")
 }
 
-func matchesWhitelist(source, name string, fileRegexp, typeRegexp *regexp.Regexp, rename map[string]string) bool {
+func matchesWhitelist(source, name string, fileRegexp, typeRegexp *regexp.Regexp, rename map[string]string, prefixes []string) bool {
 	if fileRegexp != nil && !fileRegexp.MatchString(source) {
 		return false
 	}
@@ -570,6 +594,8 @@ func matchesWhitelist(source, name string, fileRegexp, typeRegexp *regexp.Regexp
 		if next, ok := rename[name]; ok && next != "" {
 			mapped = next
 		}
+	} else if len(prefixes) > 0 {
+		mapped = stripPrefixToken(mapped, prefixes)
 	}
 	return typeRegexp.MatchString(mapped)
 }
@@ -762,6 +788,49 @@ func prefixForImportPath(pkgImportPath, importPath string) string {
 	}
 
 	return prefix + "_"
+}
+
+func collectPrefixes(pkgImportPath string, packages []packageInfo) []string {
+	prefixes := make([]string, 0, len(packages))
+	seen := make(map[string]struct{})
+
+	for _, pkg := range packages {
+		prefix := prefixForImportPath(pkgImportPath, pkg.importPath)
+		if prefix == "" {
+			continue
+		}
+		if _, ok := seen[prefix]; ok {
+			continue
+		}
+		seen[prefix] = struct{}{}
+		prefixes = append(prefixes, prefix)
+	}
+
+	sort.Slice(prefixes, func(i, j int) bool {
+		return len(prefixes[i]) > len(prefixes[j])
+	})
+
+	return prefixes
+}
+
+func stripPrefixes(content string, prefixes []string) string {
+	if len(prefixes) == 0 {
+		return content
+	}
+
+	re := regexp.MustCompile(`\b[A-Za-z_][A-Za-z0-9_]*\b`)
+	return re.ReplaceAllStringFunc(content, func(token string) string {
+		return stripPrefixToken(token, prefixes)
+	})
+}
+
+func stripPrefixToken(token string, prefixes []string) string {
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(token, prefix) {
+			return strings.TrimPrefix(token, prefix)
+		}
+	}
+	return token
 }
 
 func resolvePkgDir(explicit string) (string, error) {
